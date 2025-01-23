@@ -9,17 +9,18 @@ contract Launchpad is Ownable, ReentrancyGuard {
     struct ProjectInfo {
         address admin;
         address tokenAddress;
+        address paymentToken; 
         uint256 startTime;
         uint256 endTime;
-        uint256 tokenPrice;     // Price in wei per token (1 ether = 10^18 wei)
+        uint256 tokenPrice; 
         uint256 totalTokens;
         uint256 tokensSold;
         uint256 minPurchase;
         uint256 maxPurchase;
     }
 
-    mapping(address => ProjectInfo) public projects;
-    
+    mapping(address => ProjectInfo) projects;
+
     // Events
     event ProjectCreated(
         address indexed tokenAddress,
@@ -27,7 +28,7 @@ contract Launchpad is Ownable, ReentrancyGuard {
         uint256 startTime,
         uint256 endTime
     );
-    
+
     event TokensPurchased(
         address indexed buyer,
         address indexed tokenAddress,
@@ -42,27 +43,30 @@ contract Launchpad is Ownable, ReentrancyGuard {
     error InsufficientTokens();
     error InvalidTimeRange();
     error InvalidStartTime();
-    
+    error PaymentFailed();
+
     constructor() Ownable(msg.sender) {}
 
     function initializeProject(
         address _tokenAddress,
+        address _paymentToken, 
         uint256 _startTime,
         uint256 _endTime,
         uint256 _tokenPrice,
         uint256 _totalTokens,
         uint256 _minPurchase,
         uint256 _maxPurchase
-    ) external {
+    ) external onlyOwner {
         // Validate time parameters
         if (_endTime <= _startTime) revert InvalidTimeRange();
         if (_startTime <= block.timestamp) revert InvalidStartTime();
 
         ProjectInfo storage project = projects[_tokenAddress];
-        
+
         // Initialize project state
         project.admin = msg.sender;
         project.tokenAddress = _tokenAddress;
+        project.paymentToken = _paymentToken;
         project.startTime = _startTime;
         project.endTime = _endTime;
         project.tokenPrice = _tokenPrice;
@@ -84,12 +88,12 @@ contract Launchpad is Ownable, ReentrancyGuard {
     function purchaseTokens(
         address _tokenAddress,
         uint256 _amount
-    ) external payable nonReentrant {
+    ) external nonReentrant onlyOwner{
         ProjectInfo storage project = projects[_tokenAddress];
-        
+
         // Check if sale is active
         if (
-            block.timestamp < project.startTime || 
+            block.timestamp < project.startTime ||
             block.timestamp > project.endTime
         ) revert SaleInactive();
 
@@ -100,11 +104,18 @@ contract Launchpad is Ownable, ReentrancyGuard {
 
         // Calculate price
         uint256 price = _amount * project.tokenPrice;
-        if (msg.value != price) revert("Incorrect payment amount");
 
-        // Transfer tokens to buyer
+        // Transfer payment tokens from buyer to contract
+        bool success = IERC20(project.paymentToken).transferFrom(
+            msg.sender,
+            address(this),
+            price
+        );
+        if (!success) revert PaymentFailed();
+
+        // Transfer purchased tokens to buyer
         IERC20(project.tokenAddress).transfer(msg.sender, _amount);
-        
+
         // Update state
         project.tokensSold += _amount;
 
@@ -115,18 +126,17 @@ contract Launchpad is Ownable, ReentrancyGuard {
     function withdrawFunds(address _tokenAddress) external {
         ProjectInfo storage project = projects[_tokenAddress];
         require(msg.sender == project.admin, "Not authorized");
-        
+
         // Transfer remaining tokens back to admin
         uint256 remainingTokens = IERC20(_tokenAddress).balanceOf(address(this));
         if (remainingTokens > 0) {
             IERC20(_tokenAddress).transfer(project.admin, remainingTokens);
         }
-        
-        // Transfer collected ETH to admin
-        uint256 balance = address(this).balance;
-        if (balance > 0) {
-            (bool sent, ) = project.admin.call{value: balance}("");
-            require(sent, "Failed to send ETH");
+
+        // Transfer collected payment tokens to admin
+        uint256 paymentTokenBalance = IERC20(project.paymentToken).balanceOf(address(this));
+        if (paymentTokenBalance > 0) {
+            IERC20(project.paymentToken).transfer(project.admin, paymentTokenBalance);
         }
     }
 
@@ -134,6 +144,4 @@ contract Launchpad is Ownable, ReentrancyGuard {
     function getProjectInfo(address _tokenAddress) external view returns (ProjectInfo memory) {
         return projects[_tokenAddress];
     }
-
-    receive() external payable {}
 }
