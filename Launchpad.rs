@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Mint};
 
-declare_id!("HcuPhydFQWnGPg6jXwG7G5v2Ygso7RQ8KaNFAFBL1cJe");
+declare_id!("DFnvzRhrQjXNZqU2dJHDeFcVvg7tWssHN5gBgwsPs9oG");
 
 #[program]
 pub mod launchpad {
@@ -61,46 +61,31 @@ pub mod launchpad {
     }
 
     // Purchase tokens from the launchpad
-    pub fn purchase_tokens(
-        ctx: Context<PurchaseTokens>,
-        amount: u64
-    ) -> Result<()> {
+    pub fn purchase_tokens(ctx: Context<PurchaseTokens>, amount: u64) -> Result<()> {
         let project_info = &mut ctx.accounts.project_info;
-        let clock = Clock::get()?;
+        
+        // Validate sale is active and purchase amount
+        require!(Clock::get()?.unix_timestamp >= project_info.start_time 
+            && Clock::get()?.unix_timestamp <= project_info.end_time, 
+            LaunchpadError::SaleInactive);
+        require!(amount >= project_info.min_purchase 
+            && amount <= project_info.max_purchase 
+            && project_info.tokens_sold.checked_add(amount).unwrap() <= project_info.total_tokens,
+            LaunchpadError::InvalidAmount);
 
-        // Check if sale is active
-        require!(
-            clock.unix_timestamp >= project_info.start_time 
-            && clock.unix_timestamp <= project_info.end_time,
-            LaunchpadError::SaleInactive
-        );
-
-        // Validate purchase amount
-        require!(amount >= project_info.min_purchase, LaunchpadError::BelowMinimum);
-        require!(amount <= project_info.max_purchase, LaunchpadError::AboveMaximum);
-        require!(
-            project_info.tokens_sold.checked_add(amount).unwrap() <= project_info.total_tokens,
-            LaunchpadError::InsufficientTokens
-        );
-
-        // Calculate price in lamports
-        let price = amount.checked_mul(project_info.token_price).unwrap();
-
-        // Transfer SOL from buyer to project vault
-        let transfer_sol_ix = anchor_lang::solana_program::system_instruction::transfer(
-            &ctx.accounts.buyer.key(),
-            &ctx.accounts.project_vault.key(),
-            price,
-        );
+        // Transfer SOL and tokens
         anchor_lang::solana_program::program::invoke(
-            &transfer_sol_ix,
+            &anchor_lang::solana_program::system_instruction::transfer(
+                &ctx.accounts.buyer.key(),
+                &ctx.accounts.project_vault.key(),
+                amount.checked_mul(project_info.token_price).unwrap(),
+            ),
             &[
                 ctx.accounts.buyer.to_account_info(),
                 ctx.accounts.project_vault.to_account_info(),
             ],
         )?;
 
-        // Transfer tokens to buyer
         token::transfer(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -113,9 +98,7 @@ pub mod launchpad {
             amount,
         )?;
 
-        // Update state
-        project_info.tokens_sold = project_info.tokens_sold.checked_add(amount).unwrap();
-
+        project_info.tokens_sold += amount;
         Ok(())
     }
 }
@@ -163,6 +146,8 @@ pub struct PurchaseTokens<'info> {
 pub enum LaunchpadError {
     #[msg("Sale is not active")]
     SaleInactive,
+    #[msg("Invalid purchase amount")]
+    InvalidAmount,
     #[msg("Purchase amount below minimum")]
     BelowMinimum,
     #[msg("Purchase amount above maximum")]
